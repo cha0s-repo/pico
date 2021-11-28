@@ -1,0 +1,109 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; These programs implement full-duplex SPI, with a SCK period of 4 clock
+; cycles. A different program is provided for each value of CPHA, and CPOL is
+; achieved using the hardware GPIO inversion available in the IO controls.
+;
+; Transmit-only SPI can go twice as fast -- see the ST7789 example!
+
+
+.program sdio_cmd
+.side_set 1
+
+; Pin assignments:
+; - SCK is side-set pin 0
+; - CMD1 is OUT pin 0
+;
+; Autopush and autopull must be enabled, and the serial frame size is set by
+; configuring the push/pull threshold. Shift left/right is fine, but you must
+; justify the data yourself. This is done most conveniently for frame sizes of
+; 8 or 16 bits by using the narrow store replication and narrow load byte
+; picking behaviour of RP2040's IO fabric.
+
+; Clock phase = 0: data is captured on the leading edge of each SCK pulse, and
+; transitions on the trailing edge, or some time before the first leading edge.
+
+sendloop:
+    out x, 1 side 1 ;
+    mov pins, x side 1 ;
+    nop         side 0 ;
+    jmp sendloop side 0  ; output fifo data
+
+.program sdio_dat
+.side_set 1
+; the fifo should start with buffer size in first byte
+; osr size need set to 8 bits
+; sdio send MSB first
+    out y, 8    side 1 ; load transfer size from first fifo 
+    set pins, 0 side 0  ; cmd start
+    set pins, 0 side 1  ; keep for one cyle
+sendloop:
+    out pins, 1 side 0 ;
+    jmp y--, sendloop side 1  ; output fifo data    
+    set pins, 1 side 0 ; the end bit
+    set pins, 1 side 1 ;
+
+.program sdio_cmd_cap
+; capture sdio cmd pin, capture freq should 2 times of sdio clk
+; pin 0 is cmd line, pin 1 is clock
+    wait 1 pin 1  
+    wait 0 pin 1
+    in pins, 1
+
+
+% c-sdk {
+#include "hardware/gpio.h"
+static inline void pio_sdio_cmd_init(PIO pio, uint sm, uint prog_offs, uint n_bits,
+        float clkdiv, bool cpha, bool cpol, uint pin_sck, uint pin_cmd) {
+    pio_sm_config c = sdio_cmd_program_get_default_config(prog_offs);
+    sm_config_set_out_pins(&c, pin_cmd, 1);
+    sm_config_set_sideset_pins(&c, pin_sck);
+    // Only support MSB-first in this example code (shift to left, auto push/pull, threshold=nbits)
+    sm_config_set_out_shift(&c, false, true, n_bits);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    // CMD, SCK output are high
+    pio_sm_set_pins_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_cmd), (1u << pin_sck) | (1u << pin_cmd));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_cmd), (1u << pin_sck) | (1u << pin_cmd) );
+    pio_gpio_init(pio, pin_cmd);
+    pio_gpio_init(pio, pin_sck);
+
+    // The pin muxes can be configured to invert the output (among other things
+    // and this is a cheesy way to get CPOL=1
+    gpio_set_outover(pin_sck, cpol ? GPIO_OVERRIDE_INVERT : GPIO_OVERRIDE_NORMAL);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+static inline void pio_sdio_cmd_cap_init(PIO pio, uint sm, uint offset, uint pin, float clkdiv) {
+    pio_sm_config c = sdio_cmd_cap_program_get_default_config(offset);
+
+    // Set the IN base pin to the provided `pin` parameter. This is the data
+    // pin, and the next-numbered GPIO is used as the clock pin.
+    sm_config_set_in_pins(&c, pin);
+    // Set the pin directions to input at the PIO
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 2, false);
+    // Connect these GPIOs to this PIO block
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    sm_config_set_clkdiv(&c, clkdiv);
+    // Shifting to left matches the customary MSB-first ordering of SPI.
+    sm_config_set_in_shift(
+        &c,
+        false, // Shift-to-right = false (i.e. shift to left)
+        true,  // Autopush enabled
+        8      // Autopush threshold = 8
+    );
+
+    // We only receive, so disable the TX FIFO to make the RX FIFO deeper.
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+    // Load our configuration, and start the program from the beginning
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
