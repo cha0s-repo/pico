@@ -102,8 +102,7 @@ static inline void pio_sdio_cmd_cap_init(PIO pio, uint sm, uint offset, uint pin
     // We only receive, so disable the TX FIFO to make the RX FIFO deeper.
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
 
-    // Load our configuration, and start the program from the beginning
+    // Load our configuration, application should start manaual
     pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
 }
 %}

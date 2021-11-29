@@ -8,7 +8,7 @@ target_sources(pio_sdio PRIVATE
         pio_sdio.h
         )
 
-target_link_libraries(pio_sdio PRIVATE pico_stdlib hardware_pio)
+target_link_libraries(pio_sdio PRIVATE pico_stdlib hardware_pio hardware_dma)
 
 # enable usb output, disable uart output
 pico_enable_stdio_usb(pio_sdio 1)
