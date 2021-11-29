@@ -33,11 +33,13 @@
 #define SDIO_SIZE       1024
 
 static uint8_t cap_buf[CAP_SIZE];
-static uint8_t sdio_buf[SDIO_SIZE];
-static uint32_t sdio_w_ptr, sdio_cnt;
-static uint32_t dma_cnt;
-static int32_t dma_last_cnt = -1;
-static uint32_t dma_r_ptr;
+
+static uint32_t dma_start;
+static uint32_t dma_fit_len = CAP_SIZE;
+static uint32_t dma_read_p ;
+static bool     dma_need_consumed = false;
+
+static uint32_t test_cnt;
 
 static pio_sdio_inst_t sdio_cmd = {
         .pio = pio0,
@@ -53,12 +55,10 @@ static dma_channel_config *dma_cfg;
 
 static void send_data(const pio_sdio_inst_t *sdio) {
     static uint8_t txbuf[BUF_SIZE];
-    txbuf[0] = 0x55;
-    txbuf[1] = 0x12;
-    txbuf[2] = 0x34;
-    txbuf[3] = 0x56;
-    txbuf[4] = 0x78;
-    txbuf[5] = 0x99;
+
+    for (int i = 0; i < BUF_SIZE; i++) {
+        txbuf[i] = test_cnt++;
+    }
 
     pio_sm_clear_fifos(sdio_cmd.pio, sdio_cmd.sm);
     pio_sm_restart(sdio_cmd.pio, sdio_cmd.sm);
@@ -66,29 +66,29 @@ static void send_data(const pio_sdio_inst_t *sdio) {
     pio_spi_write8_blocking(sdio, txbuf, BUF_SIZE);
 }
 
-static int sdio_buf_push(const uint8_t *start, uint32_t len) {
-    int i = 0;
-    uint32_t fit_size = (sdio_cnt + len) > SDIO_SIZE ? (SDIO_SIZE - sdio_cnt) : len;
-    for (i = 0; i < fit_size; i++) {
-        if (sdio_w_ptr >= SDIO_SIZE) sdio_w_ptr = 0;
-        sdio_buf[sdio_w_ptr++] = start[i];
-    }
-    sdio_cnt += fit_size;
-    return i;
+static void reconfig_dma(uint32_t start, uint32_t len) {
+
 }
 
 static void dma_handler() {
-
-    // Clear the interrupt request.
+        // Clear the interrupt request.
     dma_hw->ints0 = 1u << DMA_CHAN;
+
+    uint32_t start = dma_start + dma_fit_len;
+    int len =  CAP_SIZE - (start - dma_read_p);
+
+    if (len <= 0 ) {
+        // wait for data consumed
+        dma_need_consumed = true;
+        printf("need consume\n");
+        return;
+    }
+
     // Give the channel a new wave table entry to read from, and re-trigger it
-    dma_channel_set_write_addr(DMA_CHAN, cap_buf, true);
-    dma_channel_set_trans_count(DMA_CHAN, CAP_SIZE, true);
-    
-    dma_cnt++;
-    dma_last_cnt = -1;
-    sdio_buf_push(&cap_buf[dma_r_ptr], CAP_SIZE - dma_r_ptr);
-    dma_r_ptr = 0;
+    dma_channel_set_write_addr(DMA_CHAN, &cap_buf[start%CAP_SIZE], true);
+    dma_channel_set_trans_count(DMA_CHAN, len, true);
+    dma_start = start;
+    dma_fit_len = len;
 }
 
 static void dma_init() {
@@ -97,6 +97,7 @@ static void dma_init() {
     channel_config_set_write_increment(dma_cfg, true);
     channel_config_set_dreq(dma_cfg, pio_get_dreq(sdio_cmd_cap.pio, sdio_cmd_cap.sm, false));
     channel_config_set_transfer_data_size(dma_cfg, DMA_SIZE_8);
+    channel_config_set_ring(dma_cfg, true, WRAP_BIT);
 
     dma_channel_configure(DMA_CHAN, dma_cfg,
         cap_buf,        // Destination pointer
@@ -119,15 +120,26 @@ static int dma_rx_remains() {
 }
 
 static void print_buf() {
-    uint32_t c = sdio_cnt;
-    sdio_cnt = 0;
-    int start = sdio_w_ptr - c;
-    if (start < 0) {
-        start += SDIO_SIZE;
+    int consume = 10;
+    int dma_rem = dma_rx_remains();
+
+    uint32_t csm_end = dma_start + (dma_fit_len - dma_rem);
+    if ((dma_read_p + consume ) > csm_end) {
+        consume = csm_end - dma_read_p;
     }
-    for (int i = 0; i < c; i++) {
-        if (start >= SDIO_SIZE) start = 0;
-        printf(" %02x", sdio_buf[start++]);
+    uint32_t raw = dma_read_p % CAP_SIZE;
+
+    for (int i = 0; i < consume; i++) {
+        if (raw >= CAP_SIZE) raw = 0;
+        printf(" %02x", cap_buf[raw++]);
+    }
+    dma_read_p += consume;
+    printf("\n");
+
+    if (dma_need_consumed) {
+        printf("consumed\n");
+        dma_need_consumed = false;
+        dma_handler();
     }
 }
 
@@ -159,16 +171,6 @@ int main() {
     while (1) {
         send_data(&sdio_cmd);
         sleep_ms(500);
-
-        if (dma_last_cnt == dma_cnt) {
-            // in this period dma did not fetch data, read remains data out
-            uint32_t ldata = CAP_SIZE - dma_rx_remains();
-            if (ldata > dma_r_ptr) {
-                sdio_buf_push(&cap_buf[dma_r_ptr], ldata - dma_r_ptr);
-                dma_r_ptr = ldata;
-            }
-        } 
-        dma_last_cnt = dma_cnt;
         
         print_buf();
         
