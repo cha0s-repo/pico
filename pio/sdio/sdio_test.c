@@ -16,6 +16,7 @@
 // CPOL/CPHA combinations, with the serial input and output pin mapped to the
 // same GPIO. Any data written into the state machine's TX FIFO should then be
 // serialised, deserialised, and reappear in the state machine's RX FIFO.
+// #define TEST_SDIO   
 
 #define PIN_CMD 11
 #define PIN_SCK 12
@@ -28,7 +29,7 @@
 #define DMA_CHAN        0
 
 #define BUF_SIZE        6
-#define WRAP_BIT        4
+#define WRAP_BIT        8
 #define CAP_SIZE        (1<<WRAP_BIT)
 #define SDIO_SIZE       1024
 
@@ -80,7 +81,7 @@ static void dma_handler() {
     if (len <= 0 ) {
         // wait for data consumed
         dma_need_consumed = true;
-        printf("need consume\n");
+        
         return;
     }
 
@@ -120,24 +121,30 @@ static int dma_rx_remains() {
 }
 
 static void print_buf() {
-    int consume = 10;
+    int consume = 6;
     int dma_rem = dma_rx_remains();
+    int start_bit = 0;
+    int dir = 0;
+    int cmd_no = 0;
+    int cmd_data = 0;
 
     uint32_t csm_end = dma_start + (dma_fit_len - dma_rem);
     if ((dma_read_p + consume ) > csm_end) {
-        consume = csm_end - dma_read_p;
+        return;
     }
     uint32_t raw = dma_read_p % CAP_SIZE;
 
-    for (int i = 0; i < consume; i++) {
-        if (raw >= CAP_SIZE) raw = 0;
-        printf(" %02x", cap_buf[raw++]);
-    }
+    start_bit = cap_buf[raw] >> 7 & 1;
+    dir = cap_buf[raw] >> 6 & 1;
+    cmd_no = cap_buf[raw] & (0x3f);
+
+    cmd_data = (cap_buf[(raw+1)% CAP_SIZE] << 8) + cap_buf[(raw+2)% CAP_SIZE];
+
     dma_read_p += consume;
-    printf("\n");
+    printf("sdio cmd: %d, dir %d, cmd code %d, data %d\n", start_bit, dir, cmd_no, cmd_data);
 
     if (dma_need_consumed) {
-        printf("consumed\n");
+        
         dma_need_consumed = false;
         dma_handler();
     }
@@ -145,12 +152,16 @@ static void print_buf() {
 
 int main() {
     stdio_init_all();
+    gpio_set_dir(PIN_CMD_CAP, false);
+    gpio_set_dir(PIN_SCK_CAP, false);
+    gpio_pull_up(PIN_CMD_CAP);
+    gpio_pull_up(PIN_SCK_CAP);
     sleep_ms(5000);
     printf("start....\n");
 
+#ifdef TEST_SDIO
     float clkdiv = 31.25f;  // 1 MHz @ 125 clk_sys
     uint sdio_cmd_offs = pio_add_program(sdio_cmd.pio, &sdio_cmd_program);
-    uint sdio_cmd_cap_offs = pio_add_program(sdio_cmd_cap.pio, &sdio_cmd_cap_program);
     uint cpha = 1;          // clock stay hi when idle
     uint cpol = 0;          // down edge enable
 
@@ -164,12 +175,16 @@ int main() {
                     PIN_SCK,
                     PIN_CMD
     );
+#endif
+    uint sdio_cmd_cap_offs = pio_add_program(sdio_cmd_cap.pio, &sdio_cmd_cap_program);
 
     pio_sdio_cmd_cap_init(sdio_cmd_cap.pio, sdio_cmd_cap.sm, sdio_cmd_cap_offs, PIN_CMD_CAP, 1.0f);
  
     dma_init();
     while (1) {
+#ifdef TEST_SDIO
         send_data(&sdio_cmd);
+#endif
         sleep_ms(500);
         
         print_buf();

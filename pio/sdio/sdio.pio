@@ -50,9 +50,23 @@ sendloop:
 .program sdio_cmd_cap
 ; capture sdio cmd pin, capture freq should 2 times of sdio clk
 ; pin 0 is cmd line, pin 1 is clock
+    set x, 31
+    set y, 16
+
     wait 1 pin 1  
     wait 0 pin 1
+    wait 0 pin 0    ; cmd start bit 0
+fetch1:
     in pins, 1
+    wait 1 pin 1  
+    wait 0 pin 1
+    jmp x--, fetch1
+fetch2:
+    in pins, 1
+    wait 1 pin 1  
+    wait 0 pin 1
+    jmp y--, fetch2
+
 
 
 % c-sdk {
